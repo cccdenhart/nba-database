@@ -1,0 +1,158 @@
+---
+title: "CS3200 Final Project"
+output: html_notebook
+---
+
+** Data Source: https://www.basketball-reference.com/teams/
+
+** load packages
+```{r}
+library(RMySQL)
+```
+
+
+STEP 1: ESTABLISH CONNECTION WITH MYSQL
+```{r}
+conn <- dbConnect(MySQL(), user='root', password='', dbname='CelticsDB')
+```
+
+```{r}
+dbGetQuery(conn, 'select * from team')
+```
+
+STEP 2: CLEAN ALL DATA AND AGGREGATE TABLES 
+
+-- Team:
+```{r}
+# load the data
+team <- read.csv("/Users/cccdenhart/Documents/CS3200_Workspace/FinalProject/data/rawTeams.csv", header = T, stringsAsFactors = F)
+
+# remove unnecessary columns
+team <- team[,!(names(team) %in% c("Lg", "Yrs", "W.L.", "G"))]
+team <- team[-which(duplicated(team$Franchise)),]
+
+names(team) <- c("franchise", "fromYear", "toYear", "wins", "losses", "numPlyfs", "numDiv", "numConf", "numChamp")
+```
+
+-- Players:
+```{r}
+# load the data
+raw_players <- read.csv("/Users/cccdenhart/Documents/CS3200_Workspace/FinalProject/data/rawPlayers.csv", header = T, stringsAsFactors = F)
+players <- raw_players
+
+# replace experience levels labeled "R" with zeros
+players$Exp[which(players$Exp=="R")] <- 0
+
+# convert height to all inches
+feet <- as.numeric(substring(players$Ht, 0, 1))
+inches <- as.numeric(substring(players$Ht, 3, nchar(players$Ht)))
+height <- feet*12+inches
+players$Ht <- height
+
+# add team column
+players$team <- "Boston Celtics"
+
+names(players)
+
+# replace player names with just their last names
+names(players) <- c("playerNum", "playerName", "pos", "height", "weight", "birthday", "X", "yearsExp", "college", "team")
+players$playerName <- gsub("(TW)", "", players$playerName, fixed = T)
+players$playerName <- gsub("  ", "", players$playerName)
+players$fName = sapply(strsplit(players$playerName, ' '), function(x) x[1])
+players$lName = sapply(strsplit(players$playerName, ' '), function(x) x[length(x)])
+
+# remove unnecessary columns and reorder
+players <- players[,!(names(players) %in% c("X", "X.1", "X.2", "playerName"))]
+players <- players[,c("playerNum", "lName", "fName", "pos", "height", "weight", "birthday", "yearsExp", "college", "team")]
+
+# turn birthday into readable date
+players$birthday <- as.Date(players$birthday, format="%B %d %Y")
+
+# order players alphabetically
+players <- players[order(players$lName),]
+```
+
+-- Game:
+```{r}
+# load the data
+missings <- c("Did Not Play", "Inactive", "Did Not Dress")
+raw_schedule <- read.csv("/Users/cccdenhart/Documents/CS3200_Workspace/FinalProject/data/rawSchedule.csv", header = T, stringsAsFactors = F, na.strings = missings)
+
+# drop unnecessary columns
+toDrop <- c(1, 3, 4, 5, 9, 12, 13, 14, 15)
+schedule <- raw_schedule[,-toDrop]
+
+# convert isHome to a dummy variable
+names(schedule) <- c("date", "isHome", "opponent", "isWin", "homePoints", "awayPoints")
+schedule$isHome[which(schedule$isHome!="@")] <- 1
+schedule$isHome[which(schedule$isHome=="@")] <- 0
+
+# convert isWin to a dummy variable
+schedule$isWin[which(schedule$isWin=="W")] <- 1
+schedule$isWin[which(schedule$isWin=="L")] <- 0
+
+# convert dates to readable format
+schedule$date <- as.Date(schedule$date, "%a %b %d %Y")
+
+# add a column for the home team
+schedule$homeTeam <- "Boston Celtics"
+
+# reorder columns
+names(schedule) <- c("gameDate", "isHome", "opponent", "isWin", "celtPoints", "oppPoints", "celtics")
+schedule <- schedule[,c("gameDate", "celtics", "opponent", "celtPoints", "oppPoints", "isHome", "isWin")]
+```
+
+-- Players:
+
+** function for appending dfs
+```{r}
+appendTables <- function(dir){
+  filenames <- list.files(path=dir, full.names=TRUE)
+  missings <- c("Did Not Play", "Inactive", "Did Not Dress")
+  datalist <- lapply(filenames, function(f){read.csv(file=f,header=T, stringsAsFactors = F, na.strings = missings)})
+  i <- 1
+  finalDfs <- c()
+  for(df in datalist) {
+    df$lName <- players$lName[i]
+    df$fName <- players$fName[i]
+    i <- i+1
+    finalDfs <- rbind(finalDfs, df)
+  }
+  return(finalDfs)
+}
+```
+
+  -- PlayerStats aggregates:
+```{r}
+aggs <- "/Users/cccdenhart/Documents/CS3200_Workspace/FinalProject/data/PlayerAggregates"
+aggDf <- appendTables(aggs)
+finalAgg <- aggDf[,-4]
+```
+
+  -- PlayerStats season:
+```{r}
+season <- "/Users/cccdenhart/Documents/CS3200_Workspace/FinalProject/data/PlayerSeasons"
+seasDf <- appendTables(season)
+toDrop <- c(1, 2, 4, 5, 6, 7, 8, 9, 13, 16, 19)
+finalSeas <- seasDf[,-toDrop]
+
+# convert minutes played to a number.  Note: not accurate, but simplistic
+finalSeas$MP <- as.numeric(gsub(":", ".", finalSeas$MP))
+
+# reorder columns
+names(finalSeas) <- c("gameDate", "mp", "fg", "fga", "threeP", "threePA", "ft", "fta", "orb", "drb", "trb", "ast", "stl", "blk", "tov", "pf", "pts", "gmScore", "plusMinus", "lName", "fName")
+finalSeas <- finalSeas[,c("gameDate", "lName", "fName", "mp", "fg", "fga", "threeP", "threePA", "ft", "fta", "orb", "drb", "trb", "ast", "stl", "blk", "tov", "pf", "pts", "gmScore", "plusMinus")]
+
+# set column to be type Date
+finalSeas$gameDate <- as.Date(finalSeas$gameDate)
+```
+
+STEP 3: WRITE FINAL TABLES INTO MYSQL
+
+```{r}
+dbWriteTable(conn, value = team, name = "team", append = T, row.names = F)
+dbWriteTable(conn, value = players, name = "roster", append = T, row.names = F)
+dbWriteTable(conn, value = schedule, name = "seasonSched", append = T, row.names = F)
+dbWriteTable(conn, value = finalSeas, name = "playerGameStats", append = T, row.names = F)
+```
+
