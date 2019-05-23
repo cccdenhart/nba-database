@@ -1,9 +1,3 @@
-/*
- * Charlie Denhart
- * CS3200
- * HW7 -- 4/2/18
- */
-
 import java.sql.Connection;
 import java.sql.DriverManager;
 import java.sql.ResultSet;
